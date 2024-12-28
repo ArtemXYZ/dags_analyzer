@@ -4,19 +4,34 @@
 
 from datetime import datetime, timedelta
 # ---------------------------------- airflow
-from airflow.models import DagBag  # , DagModel, DagRun
+from airflow.models import DagBag, TaskInstance  # , DagModel, DagRun
 from airflow import DAG
 from airflow.decorators import task
 from airflow.utils.dates import days_ago
-from airflow.providers.postgres.hooks.postgres import PostgresHook
+# from airflow.providers.postgres.hooks.postgres import PostgresHook
+
 # ---------------------------------- Импорт сторонних библиотек
 from pandas import DataFrame
+from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine
+from sqlalchemy.engine.url import URL
 # -------------------------------- Локальные модули
 import bot_alert_telegram as bt
 import task_logger as tl
 
-
+# from table_commentator import TableCommentator
+from DAGs.table_commentator.table_commentator import TableCommentator
 # ----------------------------------------------------------------------------------------------------------------------
+CONFIG_MART_SV = {
+    'drivername': '',
+    'username': '',
+    'password': '',
+    'host': '',
+    'port': 5432,
+    'database': ''
+}
+# ----------------------------------------------------------------------------------------------------------------------
+
 class DagsAnalyzer:
     """
         Анализ имеющихся дагов в Airflow, их параметров, поиск неактуальных.
@@ -62,16 +77,36 @@ class DagsAnalyzer:
     """
 
     def __init__(self):
-        dag_bag = DagBag()
-        # con = self.engine_mart_sv()
-        # dag_models = DagModel
-        # dag_runs = DagRun - это модель таблицы.
-        # task_instances = TaskInstance
-        # Если нужно анализировать задачи не точно, надо разбираться! только для управления
+        self.dag_bag = DagBag()
 
-    def engine_mart_sv(self):
-        engine_mart_sv = PostgresHook(postgres_conn_id='mart_sv').get_sqlalchemy_engine()  # mart_sv postgres
-        return engine_mart_sv
+    @staticmethod
+    def get_url_string(any_config: dict | str) -> URL:
+        """
+            Создаем URL строку:
+        """
+
+        # Проверка типа входной конфигурации подключения:
+        # Если на вход конфигурация в словаре:
+        if isinstance(any_config, dict) == True:
+            url_string = URL.create(**any_config)  # 1. Формируем URL-строку соединения с БД.
+            #  Эквивалент: url_conf_locdb = (f'{drivername}://{username}:{password}@{host}:{port}/{database}')
+
+        # Если на вход url_conf_locdb:
+        elif isinstance(any_config, str) == True:
+            url_string = any_config
+        else:
+            url_string = None
+
+        return url_string
+
+    def get_engine(self, config: dict | str) -> Engine:
+        # engine_mart_sv = PostgresHook(postgres_conn_id='mart_sv').get_sqlalchemy_engine()  # mart_sv postgres
+        # return engine_mart_sv
+
+        # Синхронные подключения:
+        url_string = self.get_url_string(config)
+        sinc_engine = create_engine(url_string)  # , echo=True
+        return sinc_engine
 
     def get_count_dags_in_dagbag(self):
         """
@@ -80,7 +115,7 @@ class DagsAnalyzer:
 
         return self.dag_bag.size
 
-    def get_tasks_for_dag(self, task_instances: object) -> str:
+    def get_tasks_for_dag(self, task_instances: list[TaskInstance]) -> str:
         """
             Метод возвращает строку с данными на каждый таск в конкретном даге.
             Принимает: task_instances = dag.get_task_instances() # Все задачи для DAG
@@ -90,9 +125,8 @@ class DagsAnalyzer:
 
         for task in task_instances:
             task_info = (
-                f"task_id: {task.task_id},"
+                f"task_id: {task.task_id},"  # task_id
                 f" state: {task.state},"
-                f" execution_date: {task.execution_date},"
                 f" start_date: {task.start_date}, "
                 f"end_date: {task.end_date}"
             )
@@ -190,31 +224,37 @@ class DagsAnalyzer:
         dags_dict = self.dag_bag.dags
 
         for dag_id, dag in dags_dict.items():
-            last_dagrun = dag.get_last_dagrun()  # Последний выполненный DAGRun
-            task_instances = dag.get_task_instances()  # Все задачи для DAG
+            # last_dagrun = dag.get_last_dagrun()  # Последний выполненный DAGRun | (проверить) dag_id
+            # task_instances: list[TaskInstance] = dag.get_task_instances(
+            #     start_date=dag.start_date, end_date=datetime.utcnow()
+            # )  # Все задачи для DAG  | (проверить)
+
+            # execution_date = last_dagrun.execution_date if last_dagrun else None
+            # state = last_dagrun.state if last_dagrun else None
 
             # Присваиваем ключ как идентификатор дага со значениями его атрибутов:
             result[dag_id] = {
                 # -------------------------------------- Основные для идентификации:
-                'owner': dag.owner,  # Скорее всего один на все даги / -
-                'fileloc': dag.fileloc,  # Ссылка на даг /  -
-
+                # 'dag_display_name': dag.dag_display_name, в версии 2.4.3 нет метода.
+                'dag_id': dag_id,
                 'description': dag.description,  # +
-                'tags': ' ,'.join(dag.tags),  # + (можно сохранить отдельно и проводить анализ по тегам).
+                'tags': ' ,'.join(dag.tags or []),  # + (можно сохранить отдельно и проводить анализ по тегам).
+                'fileloc': dag.fileloc,  # Ссылка на даг /  -
+                'owner': dag.owner,  # Скорее всего один на все даги / -
 
                 # -------------------------------------- Основные для анализа:
                 'last_loaded': dag.last_loaded,  # +
-                'next_dagrun': dag.next_dagrun,  # + Указывает следующую запланированную дату выполнения DAG.
-                'last_dagrun': last_dagrun.execution_date,
-                'state': last_dagrun.state,
                 'max_active_runs': dag.max_active_runs,  # Сколько раз запускался
-
-                'task_instances': self.get_tasks_for_dag(task_instances),  # Список параметров каждого таска в даге.
 
                 # -------------------------------------- Мало значимые:
                 'start_date': dag.start_date,  # Скорее всего из-за days_ago функции - мало полезный тег / + -
                 'end_date': dag.end_date,
                 'schedule_interval': dag.schedule_interval,
+
+                # -------------------------------------- Разобраться:
+                # 'last_dagrun': execution_date,
+                # 'state': state,
+                # 'tasks_for_dag': self.get_tasks_for_dag(task_instances),  # Список параметров каждого таска в даге.
             }
 
         return result
@@ -239,7 +279,7 @@ class DagsAnalyzer:
 
         return result_df
 
-    def save_result_df_in_db(self, name_table: str, schema: str, replace_or_append):
+    def save_result_df_in_db(self, name_table: str, schema: str, replace_or_append, config: dict | str):
         """
             Сохраняем датафрейм в базу данных.
 
@@ -254,20 +294,51 @@ class DagsAnalyzer:
 
         result_df = self.get_result_df()
         result_df.to_sql(
-            name=name_table, schema=schema, con=self.engine_mart_sv(), if_exists=replace_or_append, index=False
+            name=name_table, schema=schema, con=self.get_engine(config), if_exists=replace_or_append, index=False
         )
 
         return None
 
+    # def save_comments(self, name_table: str, schema: str, ):
+    #
+    #     comments = TableCommentator(engine=self.get_engine(), name_table='', schema='')
+    #     comments.table_comment()
+
+
+
 
 @task
-def dags_analyzer(name_table: str, schema: str, replace_or_append):  # con: object,
+def dags_analyzer(name_table: str, schema: str, replace_or_append, config: dict | str):
+    # con: object, , table_comments: str
     """
         Оборачиваем в таск наш клас.
     """
 
-    dags_analyzer = DagsAnalyzer()
-    dags_analyzer.save_result_df_in_db(name_table=name_table, schema=schema, replace_or_append=replace_or_append)
+    dags = DagsAnalyzer()
+    dags.save_result_df_in_db(
+        name_table=name_table, schema=schema, replace_or_append=replace_or_append, config=config
+    )
+
+    engin_mart_sv = dags.get_engine(config)
+    comments = TableCommentator(engine=engin_mart_sv, name_table=name_table, schema=schema)
+    comments.table_comment('Таблица содержит выгрузку данных из Airflow по имеющимся дагам (все доступные атрибуты).')
+    # 'Тестовый коммент'  # table_comments
+    comments.column_comment(
+        dt_load='Дата обновления таблицы в базе данных.',
+        dag_id='Идентификатор DAG (строка), чаще всего совпадает с именем файла/главной функции.',
+        description='Описание DAG (строка).',
+        tags='Список тегов, связанных с DAG (список строк) для быстрого поиска DAG.',
+        fileloc='Ссылка-путь к файлу, где определен DAG (строка), (к расположению в airflow).',
+        owner='Владелец DAG (строка)',
+        last_loaded='Время последней загрузки DAG (объект datetime).',  # todo: разобраться!
+        # показывает время обращения к дагу а не его загрузку
+        max_active_runs='Максимальное количество активных запусков DAG (целое число).',  # todo: везде показывает 1,
+        # видимо последнее количество запусков за время обращения (чтения)
+        start_date='Дата начала DAGа (объект datetime: datetime(2024, 12, 19) или days_ago(1)).',
+        end_date='Дата завершения DAG, если указана (объект datetime или None).',  # todo: везде показан None
+        # (тк не удален, надо менять логику !)
+        schedule_interval='Интервал выполнения DAG (например, timedelta, None, cron).',
+    )
     return None
 
 
@@ -276,13 +347,14 @@ with DAG(
     dag_id='dags_analyzer',
     start_date=datetime(2024, 12, 19),  # ,  # Начало DAG days_ago(1)
     default_args={
+        "owner": 'Poznyishev.AA@dns-shop.ru',
         "retries": 1,
         "retry_delay": timedelta(minutes=50),
         'on_failure_callback': bt.send_alert_telegram,
         'on_success_callback': tl.log_task_success,
     },
     description="Анализ имеющихся дагов в Airflow, их параметров, поиск неактуальных.",
-    schedule_interval=None,  # последний день месяца
+    schedule='50 23 * * *',  # последний день месяца
     catchup=False,
     tags=[
         'poznyshev', 'dags_analyzer', 'analyzer', 'анализ дагов', 'поиск дагов',
@@ -290,4 +362,12 @@ with DAG(
 ) as dag:
 # ==================================================================================================================
 # ==================================================================================================================
-    dags_analyzer(name_table='dags_analyzer', schema='audit', replace_or_append='replace')
+    dags_analyzer(
+        name_table='dags_analyzer',
+        schema='audit',
+        replace_or_append='replace',
+        config=CONFIG_MART_SV,
+        # table_comments='Тестовый коммент'
+    )
+
+
